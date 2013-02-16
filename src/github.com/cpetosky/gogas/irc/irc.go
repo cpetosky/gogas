@@ -16,19 +16,19 @@ type Conn struct {
 
 // Dial connects to the provided server and returns a listening Conn.
 func Dial(host, port, nick string) (*Conn, error) {
-	conn, err := net.Dial("tcp", host+":"+port)
+	tcpConn, err := net.Dial("tcp", host+":"+port)
 	if err != nil {
 		return nil, err
 	}
 
 	in := make(chan string, 1000)
 	out := make(chan string, 1000)
-	irc := &Conn{conn, in, out, make(chan bool)}
+	conn := &Conn{tcpConn, in, out, make(chan bool)}
 
-	irc.listen()
-	irc.Out <- "NICK " + nick
-	irc.Out <- "USER " + nick + " 0 * :" + nick
-	return irc, nil
+	conn.listen()
+	conn.Out <- "NICK " + nick
+	conn.Out <- "USER " + nick + " 0 * :" + nick
+	return conn, nil
 }
 
 // Listen instructs the Conn to start sending and receiving data over its
