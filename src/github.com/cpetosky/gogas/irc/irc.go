@@ -5,13 +5,61 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 )
+
+type Message struct {
+	Prefix  string   // Origin of the message, can be nil
+	Command string   // IRC command or 3-digit reply code
+	Params  []string // Params for the command, maximum of 15
+}
+
+func parseMessage(msg string) Message {
+	// Strip off \r\n
+	msg = msg[:len(msg)-2]
+
+	var prefix string
+
+	tokens := strings.Split(msg, " ")
+
+	// Check for optional prefix and store it without leading colon
+	if tokens[0][0] == ':' {
+		prefix = tokens[0][1:]
+		tokens = tokens[1:]
+	}
+	command := tokens[0]
+	tokens = tokens[1:]
+
+	params := make([]string, 0, 15)
+	for len(tokens) > 0 && len(params) < 14 {
+		// A token starting with ":" is the final token, and can have spaces.
+		if tokens[0][0] == ':' {
+			tokens[0] = tokens[0][1:]
+			break
+		}
+		params = append(params, tokens[0])
+		tokens = tokens[1:]
+	}
+
+	// Any leftover tokens are really one final token with spaces allowed.
+	if len(tokens) > 0 {
+		params = append(params, strings.Join(tokens, " "))
+	}
+
+	return Message{prefix, command, params}
+}
+
+func (message Message) String() string {
+	return fmt.Sprintf(":%s %s %s", message.Prefix,
+		message.Command, strings.Join(message.Params, " "))
+}
 
 // Represents a connection to a single IRC server
 type Conn struct {
-	net.Conn             // The underlying TCP connection
-	In, Out  chan string // Buffered input and output channels
-	Closed   chan bool   // Written to once the connection is closed.
+	net.Conn              // The underlying TCP connection
+	Out      chan string  // Buffered channel for outgoing messages
+	In       chan Message // Contains all parsed incoming messages
+	Closed   chan bool    // Written to once the connection is closed.
 }
 
 // Dial connects to the provided server and returns a listening Conn.
@@ -22,7 +70,7 @@ func Dial(host, port, nick string) (*Conn, error) {
 	}
 
 	in := make(chan string, 1000)
-	out := make(chan string, 1000)
+	out := make(chan Message, 1000)
 	conn := &Conn{tcpConn, in, out, make(chan bool)}
 
 	conn.listen()
@@ -41,21 +89,21 @@ func (conn *Conn) listen() {
 	// Process all messages from the server into the In channel.
 	go func() {
 		for {
-			if str, err := reader.ReadString(byte('\n')); err != nil {
+			str, err := reader.ReadString(byte('\n'))
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "irc: read error: %s\n", err)
 				conn.Closed <- true
 				break
-			} else {
-				// Strip off \r\n
-				msg := str[:len(str)-2]
+			}
 
-				// IRC PING messages must be responded to with PONG + the ID provided.
-				// Handle this here so command processors don't have to think about it.
-				if msg[:4] == "PING" {
-					conn.Out <- "PONG" + msg[4:]
-				} else {
-					conn.In <- msg
-				}
+			message := parseMessage(str)
+
+			// IRC PING messages must be responded to with PONG + the ID provided.
+			// Handle this here so command processors don't have to think about it.
+			if message.Command == "PING" {
+				conn.Out <- "PONG " + message.Params[0]
+			} else {
+				conn.In <- message
 			}
 		}
 	}()
