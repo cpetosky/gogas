@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+const (
+	ReplyWelcome = "001"
+	CmdPing = "PING"
+	CmdPong = "PONG"
+)
+
 type Message struct {
 	Prefix  string   // Origin of the message, can be nil
 	Command string   // IRC command or 3-digit reply code
@@ -54,12 +60,13 @@ func (message Message) String() string {
 		message.Command, strings.Join(message.Params, " "))
 }
 
-// Represents a connection to a single IRC server
+// Represents a connection to a single IRC server.
 type Conn struct {
-	net.Conn              // The underlying TCP connection
-	Out      chan string  // Buffered channel for outgoing messages
-	In       chan Message // Contains all parsed incoming messages
-	Closed   chan bool    // Written to once the connection is closed.
+	net.Conn                          // The underlying TCP connection.
+	Out       chan string             // Buffered channel for outgoing messages.
+	In        map[string]chan Message // Hook to add  handlers based on command.
+	Unhandled chan Message            // Contains all unhandled incoming messages.
+	Closed    chan bool               // Written to once the connection is closed.
 }
 
 // Dial connects to the provided server and returns a listening Conn.
@@ -69,13 +76,28 @@ func Dial(host, port, nick string) (*Conn, error) {
 		return nil, err
 	}
 
-	in := make(chan string, 1000)
-	out := make(chan Message, 1000)
-	conn := &Conn{tcpConn, in, out, make(chan bool)}
+	out := make(chan string, 1000)
+	in := make(map[string]chan Message)
+	unhandled := make(chan Message, 1000)
+	conn := &Conn{tcpConn, out, in, unhandled, make(chan bool)}
 
+	// IRC PING messages must be responded to with PONG + the ID provided.
+	// Handle this here so command processors don't have to think about it.
+	conn.In[CmdPing] = make(chan Message, 1)
+	go func() {
+		for message := range conn.In[CmdPing] {
+			conn.Out <- CmdPong + " " + message.Params[0]
+		}
+	}()
+
+	conn.In[ReplyWelcome] = make(chan Message, 1)
 	conn.listen()
 	conn.Out <- "NICK " + nick
 	conn.Out <- "USER " + nick + " 0 * :" + nick
+
+	// Don't return until we successfully register with the server.
+	<-conn.In[ReplyWelcome]
+	delete(conn.In, ReplyWelcome)
 	return conn, nil
 }
 
@@ -97,13 +119,10 @@ func (conn *Conn) listen() {
 			}
 
 			message := parseMessage(str)
-
-			// IRC PING messages must be responded to with PONG + the ID provided.
-			// Handle this here so command processors don't have to think about it.
-			if message.Command == "PING" {
-				conn.Out <- "PONG " + message.Params[0]
+			if conn.In[message.Command] != nil {
+				conn.In[message.Command] <- message
 			} else {
-				conn.In <- message
+				conn.Unhandled <- message
 			}
 		}
 	}()

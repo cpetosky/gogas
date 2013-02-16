@@ -22,9 +22,9 @@ func main() {
 	}
 	defer conn.Close()
 
-	// Simple input handler -- just dump every line to the terminal.
+	// Simple input handler -- just dump every unhandled line to the terminal.
 	go func() {
-		for str := range conn.In {
+		for str := range conn.Unhandled {
 			fmt.Println(str)
 		}
 	}()
